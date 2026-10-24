@@ -607,6 +607,12 @@ static inline void i3c_npcm4_rollback_event_state(const struct device *dev)
 	}
 }
 
+/**
+ * @brief Hand a completed controller write to the target callbacks
+ *
+ * @return Number of bytes the controller wrote, 0 if there were none, or
+ *         -EIO if the write could not be received.
+ */
 static int i3c_npcm4_isr_rx_done(const struct device *dev)
 {
 	const struct i3c_npcm4_config *config = DEV_CFG(dev);
@@ -628,7 +634,7 @@ static int i3c_npcm4_isr_rx_done(const struct device *dev)
 		i3c_npcm4_stop_dma_rx(dev);
 		writel(I3C_DATACTRL_FLUSHFB, regs + I3C_DATACTRL);
 		i3c_npcm4_dma_read(dev, DMA_BUF_SIZE);
-		return 0;
+		return -EIO;
 	}
 
 	/* Get transfer count */
@@ -668,7 +674,7 @@ quit:
 	/* Start a new dma operation for next transfer */
 	i3c_npcm4_dma_read(dev, DMA_BUF_SIZE);
 
-	return 0;
+	return rxcnt;
 }
 
 static int i3c_npcm4_isr_tx_done(const struct device *dev)
@@ -757,6 +763,7 @@ static int i3c_npcm4_isr_receive_stop(const struct device *dev)
 	const struct i3c_npcm4_config *config = DEV_CFG(dev);
 	struct i3c_npcm4_obj *obj = DEV_DATA(dev);
 	uint32_t val;
+	int rxcnt = 0;
 
 	LOG_DBG("Received STOP: state=0x%x", obj->state);
 	val = readl(config->regs + I3C_STATUS);
@@ -768,9 +775,14 @@ static int i3c_npcm4_isr_receive_stop(const struct device *dev)
 	writel(I3C_STATUS_MATCHED, config->regs + I3C_STATUS);
 
 	if ((obj->state & SLAVE_WAIT_FOR_RX) && obj->rx_desc) {
-		i3c_npcm4_isr_rx_done(dev);
+		rxcnt = i3c_npcm4_isr_rx_done(dev);
 	}
-	if ((obj->state & SLAVE_WAIT_FOR_TX)) {
+	/*
+	 * After an IBI the controller may run a private write before it reads
+	 * the pending data. That STOP ends the write, not our read: keep the
+	 * TX data queued instead of completing (and flushing) it.
+	 */
+	if ((obj->state & SLAVE_WAIT_FOR_TX) && rxcnt == 0) {
 		i3c_npcm4_isr_tx_done(dev);
 	}
 
